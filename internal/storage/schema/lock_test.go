@@ -74,6 +74,11 @@ func TestMigrateUpWithLockUsesDatabaseScopedLockOnly(t *testing.T) {
 	}
 	defer conn.Close()
 
+	// Pre-lock fast-path probe: seed present, but the main cursor is behind,
+	// so migration work is needed and the locked pass runs.
+	expectSeedRowPresent(mock, true)
+	expectScalar(mock, "SELECT COALESCE(MAX(version), 0) FROM schema_migrations", "version", LatestVersion()-1)
+
 	lockName := MigrationLockName("testdb")
 	mock.ExpectQuery(regexp.QuoteMeta("SELECT GET_LOCK(?, ?)")).
 		WithArgs(lockName, migrationLockAcquireTimeoutSeconds).
@@ -95,6 +100,142 @@ func TestMigrateUpWithLockUsesDatabaseScopedLockOnly(t *testing.T) {
 	}
 }
 
+
+// TestMigrateUpWithLockSkipsLockWhenCurrent is the fleet-load guard: a database
+// that is already fully migrated and seeded must be probed read-only and never
+// touch GET_LOCK — otherwise every command in every concurrent bd process
+// serializes on the per-database advisory lock just to discover there is no
+// work. sqlmock's ordered expectations fail the test on any GET_LOCK,
+// RELEASE_LOCK, dolt_ignore REPLACE, or DOLT_COMMIT this path would issue.
+func TestMigrateUpWithLockSkipsLockWhenCurrent(t *testing.T) {
+	db, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatalf("create sql mock: %v", err)
+	}
+	defer db.Close()
+
+	ctx := context.Background()
+	conn, err := db.Conn(ctx)
+	if err != nil {
+		t.Fatalf("pin mock connection: %v", err)
+	}
+	defer conn.Close()
+
+	expectSeedRowPresent(mock, true)
+	expectScalar(mock, "SELECT COALESCE(MAX(version), 0) FROM schema_migrations", "version", LatestVersion())
+	expectScalar(mock, "SELECT COALESCE(MAX(version), 0) FROM ignored_schema_migrations", "version", LatestIgnoredVersion())
+	expectContentHashColumnExists(mock)
+	expectContentHashColumnExists(mock)
+	expectScalar(mock, "SELECT COUNT(*) FROM custom_types", "count", 1)
+	expectScalar(mock, "SELECT COUNT(*) FROM custom_statuses", "count", 1)
+
+	applied, err := MigrateUpWithLock(ctx, conn, "testdb")
+	if err != nil {
+		t.Fatalf("MigrateUpWithLock() error = %v", err)
+	}
+	if applied != 0 {
+		t.Fatalf("MigrateUpWithLock() applied = %d, want 0", applied)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatalf("unmet SQL expectations (an already-current database must skip GET_LOCK and the migration pass): %v", err)
+	}
+}
+
+// TestMigrateUpWithLockFallsThroughWhenSeedMissing: a database without the
+// ignored_schema_migrations dolt_ignore row must NOT take the fast path — the
+// missing row sends it through the locked pass, which asserts it exactly as
+// before.
+func TestMigrateUpWithLockFallsThroughWhenSeedMissing(t *testing.T) {
+	db, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatalf("create sql mock: %v", err)
+	}
+	defer db.Close()
+
+	ctx := context.Background()
+	conn, err := db.Conn(ctx)
+	if err != nil {
+		t.Fatalf("pin mock connection: %v", err)
+	}
+	defer conn.Close()
+
+	// Fast-path probe: row absent -> not current, no further probe queries.
+	expectSeedRowMissing(mock)
+
+	lockName := MigrationLockName("testdb")
+	mock.ExpectQuery(regexp.QuoteMeta("SELECT GET_LOCK(?, ?)")).
+		WithArgs(lockName, migrationLockAcquireTimeoutSeconds).
+		WillReturnRows(sqlmock.NewRows([]string{"locked"}).AddRow(1))
+	expectOnePendingMigration(t, mock)
+	mock.ExpectQuery(regexp.QuoteMeta("SELECT RELEASE_LOCK(?)")).
+		WithArgs(lockName).
+		WillReturnRows(sqlmock.NewRows([]string{"released"}).AddRow(1))
+
+	applied, err := MigrateUpWithLock(ctx, conn, "testdb")
+	if err != nil {
+		t.Fatalf("MigrateUpWithLock() error = %v", err)
+	}
+	if applied != 1 {
+		t.Fatalf("MigrateUpWithLock() applied = %d, want 1", applied)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatalf("unmet SQL expectations (missing seed row must fall through to the locked pass): %v", err)
+	}
+}
+
+// TestMigrateUpWithLockFallsThroughOnProbeError: a fast-path probe failure must
+// not fail the open — it falls through to the locked pass, which re-checks and
+// surfaces any genuine error itself.
+func TestMigrateUpWithLockFallsThroughOnProbeError(t *testing.T) {
+	db, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatalf("create sql mock: %v", err)
+	}
+	defer db.Close()
+
+	ctx := context.Background()
+	conn, err := db.Conn(ctx)
+	if err != nil {
+		t.Fatalf("pin mock connection: %v", err)
+	}
+	defer conn.Close()
+
+	mock.ExpectQuery(regexp.QuoteMeta("SELECT ignored FROM dolt_ignore WHERE pattern = 'ignored_schema_migrations'")).
+		WillReturnError(errors.New("transient catalog race"))
+
+	lockName := MigrationLockName("testdb")
+	mock.ExpectQuery(regexp.QuoteMeta("SELECT GET_LOCK(?, ?)")).
+		WithArgs(lockName, migrationLockAcquireTimeoutSeconds).
+		WillReturnRows(sqlmock.NewRows([]string{"locked"}).AddRow(1))
+	expectOnePendingMigration(t, mock)
+	mock.ExpectQuery(regexp.QuoteMeta("SELECT RELEASE_LOCK(?)")).
+		WithArgs(lockName).
+		WillReturnRows(sqlmock.NewRows([]string{"released"}).AddRow(1))
+
+	applied, err := MigrateUpWithLock(ctx, conn, "testdb")
+	if err != nil {
+		t.Fatalf("MigrateUpWithLock() error = %v", err)
+	}
+	if applied != 1 {
+		t.Fatalf("MigrateUpWithLock() applied = %d, want 1", applied)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatalf("unmet SQL expectations (probe error must fall through to the locked pass): %v", err)
+	}
+}
+
+// expectSeedRowPresent mocks the fast-path read-only seed probe
+// (doltIgnoreSeedCurrent) returning the ignored_schema_migrations row.
+func expectSeedRowPresent(mock sqlmock.Sqlmock, ignored bool) {
+	mock.ExpectQuery(regexp.QuoteMeta("SELECT ignored FROM dolt_ignore WHERE pattern = 'ignored_schema_migrations'")).
+		WillReturnRows(sqlmock.NewRows([]string{"ignored"}).AddRow(ignored))
+}
+
+// expectSeedRowMissing mocks the probe finding no seed row at all.
+func expectSeedRowMissing(mock sqlmock.Sqlmock) {
+	mock.ExpectQuery(regexp.QuoteMeta("SELECT ignored FROM dolt_ignore WHERE pattern = 'ignored_schema_migrations'")).
+		WillReturnRows(sqlmock.NewRows([]string{"ignored"}))
+}
 func expectOnePendingMigration(t *testing.T, mock sqlmock.Sqlmock) {
 	t.Helper()
 

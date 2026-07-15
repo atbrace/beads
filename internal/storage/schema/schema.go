@@ -194,6 +194,45 @@ var (
 	latestIgnoredVer  int
 )
 
+// doltIgnoreSeedCurrent is the read-only counterpart of MigrateUp's
+// unconditional REPLACE INTO dolt_ignore ('ignored_schema_migrations', true):
+// it reports whether that row is already present with ignored=true, i.e. the
+// REPLACE would change nothing. A missing dolt_ignore table or row reports
+// false so the caller falls through to the locked pass, which asserts the row
+// exactly as before. (Upstream #4804 checks the full doltIgnorePatterns set;
+// v1.1.0 only ever seeds this one row, so this is the faithful v1.1.0 probe.)
+func doltIgnoreSeedCurrent(ctx context.Context, db DBConn) (bool, error) {
+	var ignored bool
+	err := db.QueryRowContext(ctx,
+		"SELECT ignored FROM dolt_ignore WHERE pattern = 'ignored_schema_migrations'",
+	).Scan(&ignored)
+	if errors.Is(err, sql.ErrNoRows) {
+		return false, nil
+	}
+	if err != nil {
+		if dberrors.IsTableNotExist(err) {
+			return false, nil
+		}
+		return false, fmt.Errorf("reading dolt_ignore patterns: %w", err)
+	}
+	return ignored, nil
+}
+
+// migrationStateCurrent reports whether MigrateUp would be a complete no-op:
+// the dolt_ignore seed is fully present and no migration work is needed. It is
+// strictly read-only, so any number of concurrent processes can probe it
+// without coordination — the basis for MigrateUpWithLock's lock-free fast path.
+func migrationStateCurrent(ctx context.Context, db DBConn) (bool, error) {
+	seeded, err := doltIgnoreSeedCurrent(ctx, db)
+	if err != nil || !seeded {
+		return false, err
+	}
+	needed, err := migrationWorkNeeded(ctx, db)
+	if err != nil {
+		return false, err
+	}
+	return !needed, nil
+}
 func LatestVersion() int {
 	latestOnce.Do(func() {
 		latestVer = mainSource.latest()
