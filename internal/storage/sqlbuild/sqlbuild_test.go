@@ -125,7 +125,6 @@ func TestSearchCountsSQLShape(t *testing.T) {
 		"FROM wisp_dependencies",
 		"FROM wisp_comments",
 		"FROM wisp_labels",
-		"UNION ALL", // wisp reverse deps included
 		"WHERE x = ?",
 		"ORDER BY y",
 		"LIMIT 5",
@@ -134,10 +133,15 @@ func TestSearchCountsSQLShape(t *testing.T) {
 			t.Errorf("counts SQL missing %q", want)
 		}
 	}
+	// Wisp reverse deps included: both the durable and the wisp reverse-blocker
+	// correlated counts must be present.
+	if got := strings.Count(sql, "COALESCE(depends_on_issue_id, depends_on_wisp_id, depends_on_external) = i.id"); got != 2 {
+		t.Errorf("expected 2 correlated reverse-blocker counts (dependencies + wisp_dependencies), got %d", got)
+	}
 
 	noWispDeps := SearchCountsSQL(IssuesFilterTables, "", "", "", false, true)
-	if strings.Contains(noWispDeps, "UNION ALL") {
-		t.Error("counts SQL must not union wisp reverse deps when probe says absent")
+	if strings.Contains(noWispDeps, "wisp_dependencies") {
+		t.Error("counts SQL must not count wisp reverse deps when probe says absent")
 	}
 	if strings.Contains(noWispDeps, "JSON_ARRAYAGG(label)") {
 		t.Error("counts SQL must skip the labels join when skipLabels is set")

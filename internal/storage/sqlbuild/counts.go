@@ -29,82 +29,68 @@ const DepJSONObject = `JSON_OBJECT(
 // IssueSelectColumns positionally followed by the six extra columns in the
 // order projected here.
 func SearchCountsSQL(tables FilterTables, whereSQL, orderBySQL, limitSQL string, includeWispReverseDeps, skipLabels bool) string {
-	reverseBlockerSelect := `
-				SELECT COALESCE(depends_on_issue_id, depends_on_wisp_id, depends_on_external) AS dep_id
-				FROM dependencies WHERE type = 'blocks'
-	`
+	// Every per-issue aggregate is a correlated scalar subquery, NOT a
+	// LEFT JOIN onto an unfiltered GROUP BY derived table. Dolt's engine
+	// (go-mysql-server) materializes each derived table in full before the
+	// outer WHERE applies, so the join form pays whole-table aggregations
+	// over labels/dependencies/comments on EVERY list call regardless of
+	// filter selectivity. Correlated subqueries evaluate only for rows that
+	// survive whereSQL, as indexed point lookups (labels/deps/comments all
+	// index issue_id). Result semantics are identical: an empty correlated
+	// aggregate yields NULL exactly like an unmatched LEFT JOIN row.
+	reverseBlockerCount := `(
+				SELECT COUNT(*) FROM dependencies
+				WHERE type = 'blocks'
+				  AND COALESCE(depends_on_issue_id, depends_on_wisp_id, depends_on_external) = i.id
+			)`
 	if includeWispReverseDeps {
-		reverseBlockerSelect += `
-				UNION ALL
-				SELECT COALESCE(depends_on_issue_id, depends_on_wisp_id, depends_on_external) AS dep_id
-				FROM wisp_dependencies WHERE type = 'blocks'
-		`
+		reverseBlockerCount = `(` + reverseBlockerCount + ` + (
+				SELECT COUNT(*) FROM wisp_dependencies
+				WHERE type = 'blocks'
+				  AND COALESCE(depends_on_issue_id, depends_on_wisp_id, depends_on_external) = i.id
+			))`
 	}
 
-	labelsSelect := "l.labels_json AS labels_json"
-	labelsJoin := fmt.Sprintf(`
-		LEFT JOIN (
-			SELECT issue_id, JSON_ARRAYAGG(label) AS labels_json
-			FROM %s
-			GROUP BY issue_id
-		) l ON l.issue_id = i.id`, tables.Labels)
+	labelsSelect := fmt.Sprintf(`(
+				SELECT JSON_ARRAYAGG(label) FROM %s WHERE issue_id = i.id
+			) AS labels_json`, tables.Labels)
 	if skipLabels {
 		labelsSelect = "NULL AS labels_json"
-		labelsJoin = ""
 	}
 
 	return fmt.Sprintf(`
 		SELECT %s,
 			%s,
-			COALESCE(dc.cnt, 0) AS dep_count,
-			COALESCE(rc.cnt, 0) AS rdep_count,
-			COALESCE(cc.cnt, 0) AS comment_count,
-			pc.parent_id     AS parent_id,
-			d.deps_json      AS deps_json
+			COALESCE((
+				SELECT COUNT(*) FROM %s
+				WHERE type = 'blocks' AND issue_id = i.id
+			), 0) AS dep_count,
+			COALESCE(%s, 0) AS rdep_count,
+			COALESCE((
+				SELECT COUNT(*) FROM %s WHERE issue_id = i.id
+			), 0) AS comment_count,
+			(
+				SELECT MIN(COALESCE(depends_on_issue_id, depends_on_wisp_id, depends_on_external))
+				FROM %s
+				WHERE type = 'parent-child' AND issue_id = i.id
+			) AS parent_id,
+			(
+				SELECT JSON_ARRAYAGG(%s) FROM %s WHERE issue_id = i.id
+			) AS deps_json
 		FROM %s i
-		%s
-		LEFT JOIN (
-			SELECT issue_id, COUNT(*) AS cnt
-			FROM %s
-			WHERE type = 'blocks'
-			GROUP BY issue_id
-		) dc ON dc.issue_id = i.id
-		LEFT JOIN (
-			SELECT dep_id, COUNT(*) AS cnt FROM (
-				%s
-			) all_blockers GROUP BY dep_id
-		) rc ON rc.dep_id = i.id
-		LEFT JOIN (
-			SELECT issue_id, COUNT(*) AS cnt
-			FROM %s
-			GROUP BY issue_id
-		) cc ON cc.issue_id = i.id
-		LEFT JOIN (
-			SELECT issue_id,
-			       MIN(COALESCE(depends_on_issue_id, depends_on_wisp_id, depends_on_external)) AS parent_id
-			FROM %s
-			WHERE type = 'parent-child'
-			GROUP BY issue_id
-		) pc ON pc.issue_id = i.id
-		LEFT JOIN (
-			SELECT issue_id, JSON_ARRAYAGG(%s) AS deps_json
-			FROM %s
-			GROUP BY issue_id
-		) d ON d.issue_id = i.id
 		%s
 		%s
 		%s
 	`,
 		ReadyWorkIssueColumns,
 		labelsSelect,
-		tables.Main,
-		labelsJoin,
 		tables.Dependencies,
-		reverseBlockerSelect,
+		reverseBlockerCount,
 		tables.Comments,
 		tables.Dependencies,
 		DepJSONObject,
 		tables.Dependencies,
+		tables.Main,
 		whereSQL,
 		orderBySQL,
 		limitSQL,
