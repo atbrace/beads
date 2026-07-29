@@ -134,10 +134,92 @@ func TestSearchCountsSQLShape(t *testing.T) {
 		}
 	}
 	// Wisp reverse deps included: both the durable and the wisp reverse-blocker
-	// correlated counts must be present.
-	if got := strings.Count(sql, "COALESCE(depends_on_issue_id, depends_on_wisp_id, depends_on_external) = i.id"); got != 2 {
-		t.Errorf("expected 2 correlated reverse-blocker counts (dependencies + wisp_dependencies), got %d", got)
+	// counts must be present, one correlated subquery per target column.
+	if got := strings.Count(sql, "AS rdep_count"); got != 1 {
+		t.Errorf("expected exactly 1 rdep_count projection, got %d", got)
 	}
+	for _, want := range []string{
+		"WHERE depends_on_issue_id = i.id",
+		"WHERE depends_on_wisp_id = i.id",
+		"WHERE depends_on_external = i.id",
+	} {
+		if got := strings.Count(sql, want); got != 2 {
+			t.Errorf("expected 2 reverse-blocker subqueries with %q (dependencies + wisp_dependencies), got %d", want, got)
+		}
+	}
+}
+
+// TestSearchCountsSQLCorrelationsAreSargable pins the fix for the counts
+// mega-query's per-issue aggregates: every correlated subquery must correlate
+// on a bare indexed column and nothing else. go-mysql-server abandons the
+// issue_id index the moment a second equality predicate (`type = '...'`) sits
+// beside the correlation in the same WHERE, degrading each subquery into a
+// scan of every row of that dependency type, once per outer row. Measured on
+// a 2,140-issue / 2,506-dependency store: the whole query went 1,640ms ->
+// 75ms once the type predicates moved inside the aggregates.
+//
+// Correlating on COALESCE(depends_on_issue_id, depends_on_wisp_id,
+// depends_on_external) is unindexable for the same reason and gets the same
+// treatment: one subquery per target column, with IS NULL guards preserving
+// first-non-null COALESCE semantics.
+func TestSearchCountsSQLCorrelationsAreSargable(t *testing.T) {
+	t.Parallel()
+
+	for _, tc := range []struct {
+		name   string
+		tables FilterTables
+		wisps  bool
+	}{
+		{"issues", IssuesFilterTables, true},
+		{"wisps", WispsFilterTables, true},
+		{"issues-no-wisp-deps", IssuesFilterTables, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			sql := SearchCountsSQL(tc.tables, "", "", "", tc.wisps, false)
+
+			// A `type = '...'` equality must never share a WHERE with the
+			// correlation — it belongs inside the aggregate's CASE.
+			for _, banned := range []string{
+				"type = 'blocks' AND issue_id = i.id",
+				"type = 'parent-child' AND issue_id = i.id",
+				"COALESCE(depends_on_issue_id, depends_on_wisp_id, depends_on_external) = i.id",
+			} {
+				if strings.Contains(sql, banned) {
+					t.Errorf("counts SQL still contains non-sargable correlation %q", banned)
+				}
+			}
+
+			// The surviving type filters must be inside aggregates.
+			if !strings.Contains(sql, "SUM(CASE WHEN type = 'blocks' THEN 1 ELSE 0 END)") {
+				t.Error("blocker counts must filter type inside SUM(CASE ...)")
+			}
+			if !strings.Contains(sql, "MIN(CASE WHEN type = 'parent-child' THEN") {
+				t.Error("parent_id must filter type inside MIN(CASE ...)")
+			}
+		})
+	}
+}
+
+func TestSearchCountsSQLProjectionOrder(t *testing.T) {
+	t.Parallel()
+
+	// issueops.ScanReadyWorkRowWithCounts scans these six positionally after
+	// IssueSelectColumns; reordering the projection silently mis-scans rows.
+	sql := SearchCountsSQL(IssuesFilterTables, "", "", "", true, false)
+	want := []string{"AS labels_json", "AS dep_count", "AS rdep_count", "AS comment_count", "AS parent_id", "AS deps_json"}
+	at := 0
+	for _, w := range want {
+		i := strings.Index(sql[at:], w)
+		if i < 0 {
+			t.Fatalf("counts SQL missing %q after position %d", w, at)
+		}
+		at += i + len(w)
+	}
+}
+
+func TestSearchCountsSQLOptionalClauses(t *testing.T) {
+	t.Parallel()
 
 	noWispDeps := SearchCountsSQL(IssuesFilterTables, "", "", "", false, true)
 	if strings.Contains(noWispDeps, "wisp_dependencies") {
