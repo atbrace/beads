@@ -45,6 +45,18 @@ func (c listFilterConfig) isInfra(t string) bool {
 	return c.infraSet[t]
 }
 
+// searchesWispTier reports whether a listing filtered to this type has to merge
+// the wisps tier to be able to match anything. Infra beads (agent/role/message)
+// are stored there, and so are molecules — which are not infra, but are poured
+// as ephemeral wisps. Skipping the tier for such a type yields a filter that can
+// never return a row.
+func (c listFilterConfig) searchesWispTier(t string) bool {
+	if t == "" {
+		return false
+	}
+	return c.isInfra(t) || t == string(types.TypeMolecule)
+}
+
 type listFilterConfigSource interface {
 	GetCustomStatuses(ctx context.Context) ([]types.CustomStatus, error)
 	GetCustomTypes(ctx context.Context) ([]string, error)
@@ -314,7 +326,7 @@ func buildListFilter(in listInput, cfg listFilterConfig) (types.IssueFilter, err
 		filter.HasMetadataKey = in.hasMetadataKey
 	}
 
-	if !in.includeInfra && (in.issueType == "" || !cfg.isInfra(in.issueType)) {
+	if !in.includeInfra && !cfg.searchesWispTier(in.issueType) {
 		filter.SkipWisps = true
 	}
 
