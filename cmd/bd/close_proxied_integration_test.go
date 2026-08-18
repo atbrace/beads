@@ -370,6 +370,51 @@ func TestProxiedServerClose(t *testing.T) {
 		}
 	})
 
+	// bd-3od: the proxied path resolves issues without hydrating labels, so
+	// the validation-pending guard reads them itself. Wisps read from
+	// wisp_labels, which is why the wisp case is covered separately.
+	t.Run("close_validation_pending_refuses_without_force", func(t *testing.T) {
+		p := bdProxiedInit(t, bd, "cvpr")
+		issue := bdProxiedCreate(t, bd, p.dir, "Validation guard", "--labels", "validation:pending")
+		out := bdProxiedCloseFail(t, bd, p.dir, issue.ID)
+		if !strings.Contains(out, "validation is pending") {
+			t.Errorf("expected validation-pending guidance, got: %s", out)
+		}
+		db := openProxiedDB(t, p)
+		if got := readStatus(t, db, issue.ID); got == types.StatusClosed {
+			t.Error("validation:pending issue should stay open without --force")
+		}
+	})
+
+	t.Run("close_validation_pending_with_force", func(t *testing.T) {
+		p := bdProxiedInit(t, bd, "cvpf")
+		issue := bdProxiedCreate(t, bd, p.dir, "Validation force", "--labels", "validation:pending")
+		bdProxiedClose(t, bd, p.dir, issue.ID, "--force")
+		db := openProxiedDB(t, p)
+		if got := readStatus(t, db, issue.ID); got != types.StatusClosed {
+			t.Errorf("status: got %q, want closed", got)
+		}
+	})
+
+	t.Run("close_validation_proven_succeeds", func(t *testing.T) {
+		p := bdProxiedInit(t, bd, "cvps")
+		issue := bdProxiedCreate(t, bd, p.dir, "Validation proven", "--labels", "validation:proven")
+		bdProxiedClose(t, bd, p.dir, issue.ID)
+		db := openProxiedDB(t, p)
+		if got := readStatus(t, db, issue.ID); got != types.StatusClosed {
+			t.Errorf("status: got %q, want closed", got)
+		}
+	})
+
+	t.Run("close_wisp_validation_pending_refuses", func(t *testing.T) {
+		p := bdProxiedInit(t, bd, "cwvp")
+		wisp := bdProxiedCreate(t, bd, p.dir, "Validation wisp", "--ephemeral", "--labels", "validation:pending")
+		out := bdProxiedCloseFail(t, bd, p.dir, wisp.ID)
+		if !strings.Contains(out, "validation is pending") {
+			t.Errorf("expected validation-pending guidance for wisp, got: %s", out)
+		}
+	})
+
 	t.Run("close_epic_open_children_refuses", func(t *testing.T) {
 		p := bdProxiedInit(t, bd, "ceor")
 		epic := bdProxiedCreate(t, bd, p.dir, "Epic", "-t", "epic")

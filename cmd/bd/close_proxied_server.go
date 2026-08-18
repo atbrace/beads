@@ -235,6 +235,26 @@ func closeProxiedOne(ctx context.Context, uw uow.UnitOfWork, id, reason string, 
 		}
 	}
 
+	// Refuse issues whose done-checks are still unproven (bd-3od). The proxied
+	// GetIssue/GetWisp path returns issues with labels unhydrated, so read them.
+	if !in.force {
+		var labels []string
+		var err error
+		if isWisp {
+			labels, err = uw.LabelUseCase().GetWispLabels(ctx, id)
+		} else {
+			labels, err = uw.LabelUseCase().GetLabels(ctx, id)
+		}
+		if err != nil {
+			*errors = append(*errors, fmt.Sprintf("Error checking labels for %s: %v", id, err))
+			return closeProxiedOutcome{}, false
+		}
+		if err := checkValidationPending(id, labels); err != nil {
+			*errors = append(*errors, err.Error())
+			return closeProxiedOutcome{}, false
+		}
+	}
+
 	if !in.force {
 		var blocked bool
 		var blockers []string

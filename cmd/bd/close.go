@@ -143,6 +143,15 @@ the flags appear in the command line.`,
 				}
 			}
 
+			// Refuse issues whose done-checks are still unproven (bd-3od).
+			// Labels are hydrated by GetIssue, so this costs no extra query.
+			if !force && issue != nil {
+				if err := checkValidationPending(id, issue.Labels); err != nil {
+					fmt.Fprintf(os.Stderr, "%s\n", err)
+					continue
+				}
+			}
+
 			// Check if issue has open blockers (GH#962)
 			if !force {
 				blocked, blockers, err := activeStore.IsBlocked(ctx, id)
@@ -324,7 +333,7 @@ func init() {
 	closeCmd.Flags().String("comment", "", "Alias for --reason")
 	_ = closeCmd.Flags().MarkHidden("comment") // Hidden alias for agent/CLI ergonomics
 	closeCmd.Flags().String("reason-file", "", "Read close reason from file (use - for stdin)")
-	closeCmd.Flags().BoolP("force", "f", false, "Force close pinned issues or unsatisfied gates")
+	closeCmd.Flags().BoolP("force", "f", false, "Force close pinned issues, unsatisfied gates, or validation-pending issues")
 	closeCmd.Flags().Bool("continue", false, "Auto-advance to next step in molecule")
 	closeCmd.Flags().Bool("no-auto", false, "With --continue, show next step but don't claim it")
 	closeCmd.Flags().Bool("suggest-next", false, "Show newly unblocked issues after closing")
@@ -509,6 +518,26 @@ func checkGateSatisfaction(issue *types.Issue) error {
 	}
 
 	return fmt.Errorf("gate condition not satisfied: %s (use --force to override)", reason)
+}
+
+// validationPendingLabel marks an issue whose done-checks have not been proven
+// yet. `bd set-state <id> validation=proven` replaces it with validation:proven.
+const validationPendingLabel = "validation:pending"
+
+// checkValidationPending refuses to close an issue that still carries the
+// validation:pending state label. Returns nil when the label is absent.
+//
+// Instructions to verify before closing live in formulas and agent prompts,
+// where they are advisory: an agent that hand-rolls its own close skips them
+// and nothing notices. `bd close` is the chokepoint every close routes
+// through, so the check belongs here alongside the gate and blocker guards.
+func checkValidationPending(id string, labels []string) error {
+	for _, label := range labels {
+		if label == validationPendingLabel {
+			return fmt.Errorf("cannot close %s: validation is pending; run `bd set-state %s validation=proven --reason \"<evidence>\"` first, or use --force to override", id, id)
+		}
+	}
+	return nil
 }
 
 // autoCloseCompletedMolecule checks if closing a step completed an auto-closing

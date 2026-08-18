@@ -255,6 +255,40 @@ func TestEmbeddedClose(t *testing.T) {
 		}
 	})
 
+	// bd-3od: an issue whose done-checks are unproven carries
+	// validation:pending. Closing it silently is how unverified work gets
+	// marked done, so close refuses until the state is proven or forced.
+	t.Run("close_validation_pending_refuses_without_force", func(t *testing.T) {
+		issue := bdCreate(t, bd, dir, "Validation guard", "--type", "task", "--labels", "validation:pending")
+		out := bdCloseFail(t, bd, dir, issue.ID)
+		if !strings.Contains(out, "validation is pending") {
+			t.Errorf("expected validation-pending guidance, got:\n%s", out)
+		}
+		got := bdShow(t, bd, dir, issue.ID)
+		if got.Status == types.StatusClosed {
+			t.Error("expected validation:pending issue to stay open without --force")
+		}
+	})
+
+	t.Run("close_validation_pending_with_force", func(t *testing.T) {
+		issue := bdCreate(t, bd, dir, "Validation force", "--type", "task", "--labels", "validation:pending")
+		bdClose(t, bd, dir, issue.ID, "--force")
+		got := bdShow(t, bd, dir, issue.ID)
+		if got.Status != types.StatusClosed {
+			t.Errorf("expected closed with --force, got %s", got.Status)
+		}
+	})
+
+	t.Run("close_validation_proven_succeeds", func(t *testing.T) {
+		issue := bdCreate(t, bd, dir, "Validation proven", "--type", "task", "--labels", "validation:pending")
+		bdSetState(t, bd, dir, issue.ID, "validation=proven", "--reason", "done-check verified")
+		bdClose(t, bd, dir, issue.ID)
+		got := bdShow(t, bd, dir, issue.ID)
+		if got.Status != types.StatusClosed {
+			t.Errorf("expected closed after set-state validation=proven, got %s", got.Status)
+		}
+	})
+
 	// be-035: silent-data-loss bug. Without an authority check, actor A could
 	// close a bead claimed by actor B and bd would print "✓ Closed" with no
 	// indication the actor mismatched. The fix refuses the close (non-zero
