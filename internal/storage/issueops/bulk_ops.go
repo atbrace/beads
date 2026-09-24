@@ -216,6 +216,13 @@ func DeleteIssuesBySourceRepoInTx(ctx context.Context, tx *sql.Tx, sourceRepo st
 
 //nolint:gosec // G201: table names are hardcoded
 func UpdateIssueIDInTx(ctx context.Context, tx *sql.Tx, oldID, newID string, issue *types.Issue, actor string) error {
+	oldIssue, err := GetIssueInTx(ctx, tx, oldID)
+	if err != nil {
+		return err
+	}
+	if HasSignedHumanAnswer(oldIssue.Notes) {
+		return fmt.Errorf("signed HUMAN card %s: cannot rename", oldID)
+	}
 	if IsActiveWispInTx(ctx, tx, oldID) {
 		return updateWispIDInTx(ctx, tx, oldID, newID, issue, actor)
 	}

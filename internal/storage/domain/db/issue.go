@@ -91,6 +91,15 @@ func (r *issueSQLRepositoryImpl) Update(ctx context.Context, id string, updates 
 		return nil
 	}
 
+	// Read the persisted preimage even when the caller supplies replacement notes.
+	oldIssue, err := r.Get(ctx, id, opts)
+	if err != nil {
+		return err
+	}
+	if err := issueops.ValidateSignedHumanUpdate(oldIssue, updates); err != nil {
+		return err
+	}
+
 	setClauses := make([]string, 0, len(updates))
 	args := make([]any, 0, len(updates)+1)
 	for key, value := range updates {
@@ -110,19 +119,8 @@ func (r *issueSQLRepositoryImpl) Update(ctx context.Context, id string, updates 
 
 	table := pickIssueTable(opts.UseWispsTable)
 
-	var oldStatus types.Status
+	oldStatus := oldIssue.Status
 	_, statusChanging := updates["status"]
-	if statusChanging {
-		//nolint:gosec // G201: table is one of two hardcoded constants
-		if err := r.runner.QueryRowContext(ctx,
-			fmt.Sprintf("SELECT status FROM %s WHERE id = ?", table), id,
-		).Scan(&oldStatus); err != nil {
-			if errors.Is(err, sql.ErrNoRows) {
-				return fmt.Errorf("db: Update %s: %w", id, sql.ErrNoRows)
-			}
-			return fmt.Errorf("db: Update %s: read old status: %w", id, err)
-		}
-	}
 
 	//nolint:gosec // G201: table is one of two hardcoded constants
 	q := fmt.Sprintf("UPDATE %s SET %s WHERE id = ?", table, strings.Join(setClauses, ", "))

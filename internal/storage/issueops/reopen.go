@@ -19,6 +19,14 @@ func ReopenIssueInTx(ctx context.Context, tx DBTX, id, reason, actor string) (*R
 	isWisp := IsActiveWispInTx(ctx, tx, id)
 	issueTable, _, eventTable, _ := WispTableRouting(isWisp)
 
+	oldIssue, err := GetIssueInTx(ctx, tx, id)
+	if err != nil {
+		return nil, err
+	}
+	if err := ValidateSignedHumanUpdate(oldIssue, map[string]any{"status": types.StatusOpen}); err != nil {
+		return nil, err
+	}
+
 	var affectedIssues, affectedWisps []string
 	var aerr error
 	if isWisp {

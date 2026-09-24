@@ -146,6 +146,10 @@ func updateIssueInTx(ctx context.Context, tx DBTX, id string, updates map[string
 		return nil, fmt.Errorf("failed to get issue for update: %w", err)
 	}
 
+	if err := ValidateSignedHumanUpdate(oldIssue, updates); err != nil {
+		return nil, err
+	}
+
 	// Validate issue_type against built-in + custom types (GH#3030).
 	// This mirrors the create path (PrepareIssueForInsert → ValidateWithCustom)
 	// and reads custom types from the same transaction, so it works reliably

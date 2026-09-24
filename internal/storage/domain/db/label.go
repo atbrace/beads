@@ -63,6 +63,9 @@ func (r *labelSQLRepositoryImpl) Delete(ctx context.Context, issueID, label, act
 		return fmt.Errorf("db: LabelSQLRepository.Delete: label must not be empty")
 	}
 	table := pickLabelTable(opts.UseWispsTable)
+	if err := issueops.ValidateSignedHumanLabelRemovalInTx(ctx, r.runner, table, issueID, label); err != nil {
+		return err
+	}
 	//nolint:gosec // G201: table is one of two hardcoded constants
 	if _, err := r.runner.ExecContext(ctx,
 		fmt.Sprintf("DELETE FROM %s WHERE issue_id = ? AND label = ?", table),
@@ -150,6 +153,18 @@ func (r *labelSQLRepositoryImpl) DeleteAllForIDs(ctx context.Context, ids []stri
 	table := "labels"
 	if opts.UseWispsTable {
 		table = "wisp_labels"
+	}
+	// Preflight the entire batch before deleting any label rows.
+	for _, id := range ids {
+		labels, err := r.List(ctx, id, opts)
+		if err != nil {
+			return 0, err
+		}
+		for _, label := range labels {
+			if err := issueops.ValidateSignedHumanLabelRemovalInTx(ctx, r.runner, table, id, label); err != nil {
+				return 0, err
+			}
+		}
 	}
 	total := 0
 	for start := 0; start < len(ids); start += deleteBatchSize {

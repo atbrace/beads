@@ -803,6 +803,10 @@ func (t *doltTransaction) RemoveLabel(ctx context.Context, issueID, label, actor
 		table = "wisp_labels"
 	}
 
+	if err := issueops.ValidateSignedHumanLabelRemovalInTx(ctx, t.txFor(table), table, issueID, label); err != nil {
+		return err
+	}
+
 	//nolint:gosec // G201: table is hardcoded
 	_, err := t.txFor(table).ExecContext(ctx, fmt.Sprintf(`
 		DELETE FROM %s WHERE issue_id = ? AND label = ?

@@ -171,6 +171,9 @@ func RemoveLabelInTx(ctx context.Context, tx DBTX, labelTable, eventTable, issue
 			eventTable = et
 		}
 	}
+	if err := ValidateSignedHumanLabelRemovalInTx(ctx, tx, labelTable, issueID, label); err != nil {
+		return err
+	}
 	if _, err := tx.ExecContext(ctx, fmt.Sprintf(`DELETE FROM %s WHERE issue_id = ? AND label = ?`, labelTable), issueID, label); err != nil {
 		return fmt.Errorf("remove label: %w", err)
 	}
