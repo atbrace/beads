@@ -183,6 +183,134 @@ func treeIDs(tree []*types.TreeNode) []string {
 	return ids
 }
 
+// TestGetDependencyTreeInTxEmitsDedupedCycleStub pins the cycle shape of the
+// stub (steveyegge's SHOULD-FIX on this PR: only the diamond was tested). A
+// cycle a → b → c → a walked from a must terminate: a, b, c expand once and the
+// back-edge re-emits a as a Deduped stub — no subtree, no recursion, no hang.
+// The cycle-shape stub is what makes the cycle OBSERVABLE in the answer where
+// previously the descent simply vanished; `bd dep cycles` remains where a cycle
+// is the answer.
+func TestGetDependencyTreeInTxEmitsDedupedCycleStub(t *testing.T) {
+	db, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatalf("sqlmock.New: %v", err)
+	}
+	defer db.Close()
+
+	mock.ExpectBegin()
+	expectIssue(mock, "a", "A")
+	expectDependencies(mock, "a", []dependencyRow{
+		{id: "b", depType: string(types.DepBlocks)},
+	})
+	expectIssueBatchOne(mock, "b")
+	expectIssue(mock, "b", "B")
+	expectDependencies(mock, "b", []dependencyRow{
+		{id: "c", depType: string(types.DepBlocks)},
+	})
+	expectIssueBatchOne(mock, "c")
+	expectIssue(mock, "c", "C")
+	expectDependencies(mock, "c", []dependencyRow{
+		{id: "a", depType: string(types.DepBlocks)},
+	})
+	expectIssueBatchOne(mock, "a")
+	// The edge c → a revisits the root: one fetch, one stub, no recursion.
+	expectIssue(mock, "a", "A")
+
+	tx, err := db.BeginTx(context.Background(), nil)
+	if err != nil {
+		t.Fatalf("BeginTx: %v", err)
+	}
+	tree, err := GetDependencyTreeInTx(context.Background(), tx, "a", 50, false, false)
+	if err != nil {
+		_ = tx.Rollback()
+		t.Fatalf("GetDependencyTreeInTx: %v", err)
+	}
+	mock.ExpectRollback()
+	if err := tx.Rollback(); err != nil {
+		t.Fatalf("Rollback: %v", err)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatalf("unmet sql expectations: %v", err)
+	}
+
+	if got := treeIDs(tree); len(tree) != 4 || got[0] != "a" || got[1] != "b" || got[2] != "c" || got[3] != "a" {
+		t.Fatalf("walk = %v, want [a b c a-stub]: %v", treeIDs(tree), treeIDs(tree))
+	}
+	stub := tree[3]
+	if !stub.Deduped || stub.Depth != 3 || stub.ParentID != "c" || stub.EdgeFromParent != types.DepBlocks {
+		t.Fatalf("cycle stub = deduped %v depth %d parent %q edge %q, want true/3/c/blocks",
+			stub.Deduped, stub.Depth, stub.ParentID, stub.EdgeFromParent)
+	}
+	for _, node := range tree[:3] {
+		if node.Deduped {
+			t.Errorf("node %s is Deduped, want only the closing re-visit flagged", node.ID)
+		}
+	}
+}
+
+// TestGetDependencyTreeInTxDepthCutoffBeatsStub pins that the depth bound wins
+// over the stub: the depth cutoff is checked BEFORE the visited check, so a
+// revisited node reached at or beyond max_depth is ABSENT from the answer
+// rather than present as a stub — the max-depth semantics are preserved
+// untouched by this PR. Shape: root expands X fully at depth 1; the longer
+// path root→A→B→X reaches X at depth 3 == maxDepth, and the cutoff fires
+// before any fetch could produce a stub.
+func TestGetDependencyTreeInTxDepthCutoffBeatsStub(t *testing.T) {
+	db, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatalf("sqlmock.New: %v", err)
+	}
+	defer db.Close()
+
+	mock.ExpectBegin()
+	expectIssue(mock, "root", "Root")
+	expectDependencies(mock, "root", []dependencyRow{
+		{id: "x", depType: string(types.DepBlocks)},
+		{id: "a", depType: string(types.DepBlocks)},
+	})
+	expectIssueBatch(mock, []string{"x", "a"})
+	// X first: expanded in full at depth 1, marking it visited.
+	expectIssue(mock, "x", "X")
+	expectDependencies(mock, "x", nil)
+	// A: expands B, whose edge back to X reaches it AT the cutoff — the
+	// depth check returns nil before the visited-stub branch, so no fetch.
+	expectIssue(mock, "a", "A")
+	expectDependencies(mock, "a", []dependencyRow{
+		{id: "b", depType: string(types.DepBlocks)},
+	})
+	expectIssueBatchOne(mock, "b")
+	expectIssue(mock, "b", "B")
+	expectDependencies(mock, "b", []dependencyRow{
+		{id: "x", depType: string(types.DepBlocks)},
+	})
+	expectIssueBatchOne(mock, "x")
+
+	tx, err := db.BeginTx(context.Background(), nil)
+	if err != nil {
+		t.Fatalf("BeginTx: %v", err)
+	}
+	tree, err := GetDependencyTreeInTx(context.Background(), tx, "root", 3, false, false)
+	if err != nil {
+		_ = tx.Rollback()
+		t.Fatalf("GetDependencyTreeInTx: %v", err)
+	}
+	mock.ExpectRollback()
+	if err := tx.Rollback(); err != nil {
+		t.Fatalf("Rollback: %v", err)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatalf("unmet sql expectations: %v", err)
+	}
+	if got := treeIDs(tree); len(got) != 4 || got[0] != "root" || got[1] != "x" || got[2] != "a" || got[3] != "b" {
+		t.Fatalf("tree = %v, want [root x a b] with no x-stub", got)
+	}
+	for _, node := range tree {
+		if node.Deduped {
+			t.Fatalf("node %s is Deduped, want no stub at or beyond the cutoff", node.ID)
+		}
+	}
+}
+
 // TestGetDependencyTreeInTxEmitsDedupedDirectBlocker reproduces the diamond
 // omission behind gastownhall/beads sys-7yjr8: root depends on mid and shared,
 // mid also depends on shared. When traversal reaches shared through mid first,
