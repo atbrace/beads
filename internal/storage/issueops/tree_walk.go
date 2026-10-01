@@ -68,6 +68,21 @@ func PruneTreeByStatus(nodes []*types.TreeNode, status types.Status) []*types.Tr
 		if node == nil {
 			continue
 		}
+		// DEDUP STUBS LOSE. A diamond now carries one node TWICE: the full
+		// occurrence at the first path's parent, and a Deduped stub at the
+		// second's. Keying last-write-wins would let the stub clobber the
+		// full occurrence's parent, so the ancestor walk would keep the
+		// stub's parent instead of the real chain — the exact orphan this
+		// function's promise forbids. The first (non-stub) occurrence wins;
+		// a stub only supplies a parent for an id with no full occurrence.
+		if node.Deduped {
+			if _, ok := parentOf[node.ID]; !ok {
+				if node.ParentID != "" && node.ParentID != node.ID {
+					parentOf[node.ID] = node.ParentID
+				}
+			}
+			continue
+		}
 		if node.ParentID != "" && node.ParentID != node.ID {
 			parentOf[node.ID] = node.ParentID
 		}
@@ -91,10 +106,20 @@ func PruneTreeByStatus(nodes []*types.TreeNode, status types.Status) []*types.Tr
 		}
 	}
 	filtered := make([]*types.TreeNode, 0, len(nodes))
+	emitted := make(map[string]bool, len(nodes))
 	for _, node := range nodes {
-		if node != nil && keep[node.ID] {
-			filtered = append(filtered, node)
+		if node == nil || !keep[node.ID] {
+			continue
 		}
+		// A Deduped stub is kept only when no full occurrence survived: the
+		// stub's edge is already implied by the full node's presence, and a
+		// kept-but-duplicate entry would reintroduce the ambiguity the walk's
+		// stub contract exists to make explicit.
+		if node.Deduped && emitted[node.ID] {
+			continue
+		}
+		emitted[node.ID] = true
+		filtered = append(filtered, node)
 	}
 	return filtered
 }

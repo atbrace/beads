@@ -483,6 +483,77 @@ func TestPruneTreeByStatusKeepsAMatchBehindANonMatch(t *testing.T) {
 	}
 }
 
+// TestPruneTreeByStatusDedupStubDoesNotClobberTheFullParent pins the
+// interaction between the diamond stubs and the prune (gastownhall/beads#5283
+// review, maphew + steveyegge): once a Deduped stub shares an id with a full
+// occurrence, a last-write-wins parentOf map lets the stub's parent overwrite
+// the full occurrence's, the ancestor walk then keeps the WRONG chain, and the
+// answer carries a node whose ParentID names something absent — the exact
+// orphan the prune promise forbids.
+//
+// DIAMOND: root:closed → mid:closed → shared:open, plus the second edge
+// root → shared arriving as the stub. Pruning to open must keep the FULL
+// chain root → mid → shared and emit the stub nowhere the full node is already
+// standing.
+func TestPruneTreeByStatusDedupStubDoesNotClobberTheFullParent(t *testing.T) {
+	tree := []*types.TreeNode{
+		{Issue: types.Issue{ID: "root", Status: types.StatusClosed}},
+		{Issue: types.Issue{ID: "mid", Status: types.StatusClosed}, Depth: 1, ParentID: "root"},
+		{Issue: types.Issue{ID: "shared", Status: types.StatusOpen}, Depth: 2, ParentID: "mid"},
+		// The stub the walk now emits for the second edge root → shared.
+		{Issue: types.Issue{ID: "shared", Status: types.StatusOpen}, Depth: 1, ParentID: "root", Deduped: true},
+	}
+	filtered := PruneTreeByStatus(tree, types.StatusOpen)
+
+	present := make(map[string]bool, len(filtered))
+	for _, node := range filtered {
+		present[node.ID] = true
+	}
+	if !present["mid"] {
+		t.Fatalf("prune dropped mid: the stub's parentOf[root] clobbered the full node's parentOf[mid], so the real ancestor chain was lost: %v", filtered)
+	}
+	for _, node := range filtered {
+		if node.ParentID != "" && !present[node.ParentID] {
+			t.Errorf("node %s names absent parent %s: pruned tree carries an orphan", node.ID, node.ParentID)
+		}
+	}
+	// The stub must not stand beside its own full occurrence.
+	counts := make(map[string]int, len(filtered))
+	for _, node := range filtered {
+		counts[node.ID]++
+	}
+	if counts["shared"] != 1 {
+		t.Errorf("shared appears %d times in the pruned answer, want 1: a stub whose full occurrence survived is a duplicate entry", counts["shared"])
+	}
+}
+
+// TestPruneTreeByStatusKeepsAStubWhenNoFullOccurrenceSurvives pins the other
+// half: an id that survives ONLY as a stub (impossible from the walk itself —
+// the full occurrence always precedes its stub — but reachable through
+// MergeBidirectionalTree's documented cross-half repetition and hand-built
+// input) keeps its own parent chain.
+func TestPruneTreeByStatusKeepsAStubWhenNoFullOccurrenceSurvives(t *testing.T) {
+	tree := []*types.TreeNode{
+		{Issue: types.Issue{ID: "root", Status: types.StatusClosed}},
+		{Issue: types.Issue{ID: "side", Status: types.StatusClosed}, Depth: 1, ParentID: "root"},
+		{Issue: types.Issue{ID: "only", Status: types.StatusOpen}, Depth: 2, ParentID: "side", Deduped: true},
+	}
+	filtered := PruneTreeByStatus(tree, types.StatusOpen)
+	var ids []string
+	for _, node := range filtered {
+		ids = append(ids, node.ID)
+	}
+	want := []string{"root", "side", "only"}
+	if len(ids) != len(want) {
+		t.Fatalf("prune = %v, want %v", ids, want)
+	}
+	for i := range want {
+		if ids[i] != want[i] {
+			t.Fatalf("prune = %v, want %v", ids, want)
+		}
+	}
+}
+
 // TestMergeBidirectionalTreeCopiesTheUpNodes pins the aliasing rule: the up half
 // is cloned, so a caller mutating the merged answer cannot reach into the slice
 // the up walk returned.
