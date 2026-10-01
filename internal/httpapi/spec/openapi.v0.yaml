@@ -6944,7 +6944,9 @@ components:
             The node this one was reached FROM, empty on the root. A node is
             EXPANDED once per walk, by the first path that got there; a second
             path reaching it re-emits it as a `deduped` stub whose `parent_id`
-            names that second path, so every edge stays visible.
+            names that second path, so every edge stays visible in the
+            UNPRUNED walk. A `status` prune narrows the answer to one entry
+            per id: a stub whose full occurrence survived the prune is dropped.
         edge_from_parent:
           type: string
           description: >-

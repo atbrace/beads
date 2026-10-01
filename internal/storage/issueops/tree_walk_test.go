@@ -554,6 +554,72 @@ func TestPruneTreeByStatusKeepsAStubWhenNoFullOccurrenceSurvives(t *testing.T) {
 	}
 }
 
+// TestPruneTreeByStatusCycleRootStubDoesNotKeepTheCycle pins the cycle-shape
+// bug from the gastownhall/beads#5283 delta review: deciding "has a full
+// occurrence" by parentOf MEMBERSHIP breaks on the root, whose full occurrence
+// has no parent and therefore never enters parentOf. A cycle-closing Deduped
+// stub of the root then installed parentOf[root] = <last node of the cycle>,
+// and the ancestor walk ran past the root and around the cycle, keeping every
+// closed cycle member through an open-only prune.
+//
+// SHAPE (exactly what TestGetDependencyTreeInTxEmitsDedupedCycleStub produces
+// at the storage layer): a:open → b:closed → c:closed, plus the cycle-closing
+// stub a(deduped, parent c). Pruning to open must return [a] alone — without
+// the stub the answer is [a], and the stub must not change that.
+func TestPruneTreeByStatusCycleRootStubDoesNotKeepTheCycle(t *testing.T) {
+	tree := []*types.TreeNode{
+		{Issue: types.Issue{ID: "a", Status: types.StatusOpen}},
+		{Issue: types.Issue{ID: "b", Status: types.StatusClosed}, Depth: 1, ParentID: "a"},
+		{Issue: types.Issue{ID: "c", Status: types.StatusClosed}, Depth: 2, ParentID: "b"},
+		{Issue: types.Issue{ID: "a", Status: types.StatusOpen}, Depth: 3, ParentID: "c", Deduped: true},
+	}
+	filtered := PruneTreeByStatus(tree, types.StatusOpen)
+
+	var ids []string
+	for _, node := range filtered {
+		ids = append(ids, node.ID)
+	}
+	want := []string{"a"}
+	if len(ids) != len(want) {
+		t.Fatalf("prune = %v, want %v: the root's cycle-closing stub must not drag closed cycle members into an open-only prune", ids, want)
+	}
+	for i := range want {
+		if ids[i] != want[i] {
+			t.Fatalf("prune = %v, want %v", ids, want)
+		}
+	}
+}
+
+// TestPruneTreeByStatusDropsStubWhoseFullSurvived documents the STATED RULE
+// under --status (gastownhall/beads#5283 delta review): an all-open diamond
+// pruned to open keeps [root mid shared] and drops the root → shared stub, so
+// the pruned answer shows each id once and the second edge is NOT re-shown.
+// "Every edge is visible" is a property of the unpruned walk; the prune trades
+// it for one entry per id. See the doc comment on PruneTreeByStatus.
+func TestPruneTreeByStatusDropsStubWhoseFullSurvived(t *testing.T) {
+	tree := []*types.TreeNode{
+		{Issue: types.Issue{ID: "root", Status: types.StatusOpen}},
+		{Issue: types.Issue{ID: "mid", Status: types.StatusOpen}, Depth: 1, ParentID: "root"},
+		{Issue: types.Issue{ID: "shared", Status: types.StatusOpen}, Depth: 2, ParentID: "mid"},
+		{Issue: types.Issue{ID: "shared", Status: types.StatusOpen}, Depth: 1, ParentID: "root", Deduped: true},
+	}
+	filtered := PruneTreeByStatus(tree, types.StatusOpen)
+
+	var ids []string
+	for _, node := range filtered {
+		ids = append(ids, node.ID)
+	}
+	want := []string{"root", "mid", "shared"}
+	if len(ids) != len(want) {
+		t.Fatalf("prune = %v, want %v: the stub whose full occurrence survived must be dropped", ids, want)
+	}
+	for i := range want {
+		if ids[i] != want[i] {
+			t.Fatalf("prune = %v, want %v", ids, want)
+		}
+	}
+}
+
 // TestMergeBidirectionalTreeCopiesTheUpNodes pins the aliasing rule: the up half
 // is cloned, so a caller mutating the merged answer cannot reach into the slice
 // the up walk returned.

@@ -180,6 +180,9 @@ type TreeResult struct {
 	//     --show-all-paths` remains a DOCUMENTED NO-OP that predates this role:
 	//     every edge is now visible, but "all paths" was never specified for a DAG
 	//     with shared subtrees and this contract still does not invent one.
+	//     EVERY EDGE VISIBLE holds for the unpruned walk; a Status prune drops a
+	//     stub whose full occurrence survived, so the pruned answer shows each
+	//     id once — see PruneTreeByStatus in the storage implementation.
 	//
 	// FOR TreeBoth the two walks are INDEPENDENT and the answer is their
 	// concatenation: every up-tree node except the root, in the up walk's order,
