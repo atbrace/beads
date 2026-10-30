@@ -27,6 +27,20 @@ func showNotFoundHint(id string) string {
 	return fmt.Sprintf("this ID may have never existed, or may reference a deleted/purged record with no trace left in the live database — try 'bd history %s'", id)
 }
 
+// commentsOmittedHint tells a stderr reader that a JSON show withheld comment
+// bodies. The payload already says it via comment_count + comments_omitted
+// (ga-clgh), but a consumer that does not know the schema sees neither and
+// reads absent comments as no comments (#5078). Returns "" for anything not
+// withheld, so hydrated rows and zero-count rows keep stderr silent.
+func commentsOmittedHint(v interface{}) string {
+	d, ok := v.(*issueops.IssueDetails)
+	if !ok || d == nil || d.CommentsOmitted == nil || !*d.CommentsOmitted ||
+		d.CommentCount == nil || *d.CommentCount <= 0 {
+		return ""
+	}
+	return fmt.Sprintf("bd: %s has %d comments not shown; add --include-comments\n", d.ID, *d.CommentCount)
+}
+
 var showCmd = &cobra.Command{
 	Use:           "show [id...] [--id=<id>...] [--current]",
 	Aliases:       []string{"view"},
@@ -294,6 +308,11 @@ var showCmd = &cobra.Command{
 
 		if jsonOutput {
 			if len(allDetails) > 0 {
+				for _, d := range allDetails {
+					if h := commentsOmittedHint(d); h != "" {
+						fmt.Fprint(os.Stderr, h)
+					}
+				}
 				if jerr := outputJSON(allDetails); jerr != nil {
 					return jerr
 				}
