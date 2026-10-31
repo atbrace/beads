@@ -3,10 +3,12 @@ package main
 import (
 	"context"
 	"errors"
+	"strings"
 	"testing"
 
 	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/types"
+	"github.com/steveyegge/beads/issueops"
 )
 
 func TestDepListAcceptsMultipleArgs(t *testing.T) {
@@ -38,10 +40,12 @@ func TestDepListAcceptsSingleArg(t *testing.T) {
 // measures 44-70s where one bulk read measures milliseconds.
 type bulkProbeStore struct {
 	storage.DoltStorage
-	issues   map[string]*types.Issue
-	err      error // forces the bulk read to fail
-	bulkReqs [][]string
-	perID    int
+	issues    map[string]*types.Issue
+	err       error // forces the bulk read to fail
+	reader    issueops.EdgeReader
+	bulkReqs  [][]string
+	perID     int
+	edgeReads int
 }
 
 func (s *bulkProbeStore) GetIssuesByIDs(_ context.Context, ids []string) ([]*types.Issue, error) {
@@ -120,5 +124,115 @@ func TestDepListBatchFallsBackWhenBulkReadFails(t *testing.T) {
 	store := &bulkProbeStore{err: errors.New("database is locked")}
 	if anchors := bulkLocalDepListAnchors(context.Background(), store, []string{"bd-1", "bd-2"}); anchors != nil {
 		t.Fatalf("bulk failure returned %+v, want nil so the per-argument loop answers", anchors)
+	}
+}
+
+// EdgeReader serves the batch "down" path: readDepListEdges asks each anchor
+// store once for its edges, so a command-level drive can see that the bulk
+// anchors reached the role.
+func (s *bulkProbeStore) EdgeReader() (issueops.EdgeReader, error) {
+	s.edgeReads++
+	if s.reader == nil {
+		return nil, errors.New("bulkProbeStore: no edge reader")
+	}
+	return s.reader, nil
+}
+
+// batchEdgeRecorder answers one bulk edge read per call, recording the anchors
+// it was asked about and returning a stored edge for each id in edges.
+type batchEdgeRecorder struct {
+	edges map[string][]*types.Dependency
+	calls [][]string
+}
+
+func (r *batchEdgeRecorder) ReadEdges(_ context.Context, req issueops.EdgeReadRequest) (issueops.EdgeReadResult, error) {
+	r.calls = append(r.calls, append([]string(nil), req.IDs...))
+	result := issueops.EdgeReadResult{Anchors: make([]issueops.AnchorEdges, 0, len(req.IDs))}
+	for _, id := range req.IDs {
+		result.Anchors = append(result.Anchors, issueops.AnchorEdges{ID: id, Edges: r.edges[id]})
+	}
+	return result, nil
+}
+
+// TestDepListBatchCommandConsumesBulkAnswer drives the COMMAND, not the
+// helper. The store-level tests above pin what bulkLocalDepListAnchors
+// returns; none of them can see the call site. Removing the bulk lookup from
+// depListCmd's loop (`if anchor, ok := bulk[arg]; ok` -> `ok && false`)
+// switches the whole 44-70s -> 0.3s claim off and stayed green on all three:
+// the command fell back to the unchanged per-argument path and every test
+// still passed because none of them ran the command. This test closes that
+// mutant: a batch of exact ids runs depListCmd.RunE end to end and asserts
+// ZERO per-id SearchIssues/GetIssue calls — the one bulk answer must be what
+// the command resolves from — plus that the anchors it produced reached the
+// edge role and the printer, so the zero cannot be reached by doing nothing.
+func TestDepListBatchCommandConsumesBulkAnswer(t *testing.T) {
+	saveAndRestoreGlobals(t)
+	resetCommandContext()
+	prevJSON := jsonOutput
+	jsonOutput = false
+	defer func() { jsonOutput = prevJSON }()
+
+	recorder := &batchEdgeRecorder{edges: map[string][]*types.Dependency{
+		"bd-1": {{IssueID: "bd-1", DependsOnID: "bd-9", Type: types.DepBlocks}},
+	}}
+	probe := &bulkProbeStore{
+		issues: map[string]*types.Issue{
+			"bd-1": {ID: "bd-1"},
+			"bd-2": {ID: "bd-2"},
+			"bd-3": {ID: "bd-3"},
+		},
+		reader: recorder,
+	}
+	store = probe
+
+	// depListCmd is package-level: pin the flags this path reads and put
+	// whatever another test left behind back afterwards.
+	prevDir, _ := depListCmd.Flags().GetString("direction")
+	prevType, _ := depListCmd.Flags().GetString("type")
+	defer func() {
+		_ = depListCmd.Flags().Set("direction", prevDir)
+		_ = depListCmd.Flags().Set("type", prevType)
+	}()
+	if err := depListCmd.Flags().Set("direction", "down"); err != nil {
+		t.Fatal(err)
+	}
+	if err := depListCmd.Flags().Set("type", ""); err != nil {
+		t.Fatal(err)
+	}
+
+	out := captureStdout(t, func() error {
+		return depListCmd.RunE(depListCmd, []string{"bd-1", "bd-2", "bd-3"})
+	})
+
+	if len(probe.bulkReqs) != 1 {
+		t.Fatalf("bulk reads = %d, want exactly 1", len(probe.bulkReqs))
+	}
+	// The mutant pin: if the command ignores the bulk map, every argument
+	// goes back through resolveAndGetIssueWithRouting and this counter moves.
+	if probe.perID != 0 {
+		t.Fatalf("per-id lookups = %d, want 0 under the command: the speedup is only real if the command resolves exact ids from the bulk answer", probe.perID)
+	}
+	// The zero must not be vacuous: the bulk anchors have to reach the edge
+	// role in ONE call, in argument order.
+	if len(recorder.calls) != 1 {
+		t.Fatalf("edge-role calls = %d, want 1 (one bulk read feeds one bulk edge read)", len(recorder.calls))
+	}
+	want := []string{"bd-1", "bd-2", "bd-3"}
+	if len(recorder.calls[0]) != len(want) {
+		t.Fatalf("edge-role anchors = %v, want %v", recorder.calls[0], want)
+	}
+	for i := range want {
+		if recorder.calls[0][i] != want[i] {
+			t.Fatalf("edge-role anchors = %v, want %v (argument order)", recorder.calls[0], want)
+		}
+	}
+	// And the printed answer names all three anchors, with bd-1's edge.
+	for _, id := range want {
+		if !strings.Contains(out, id) {
+			t.Fatalf("stdout missing anchor %q; got:\n%s", id, out)
+		}
+	}
+	if !strings.Contains(out, "bd-9 via blocks") {
+		t.Fatalf("stdout missing bd-1's stored edge; got:\n%s", out)
 	}
 }
