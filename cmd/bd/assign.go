@@ -45,7 +45,7 @@ Examples:
 		}
 
 		id := args[0]
-		assignee := args[1]
+		assignee := normalizeAssigneeInput(args[1])
 
 		ctx := rootCtx
 

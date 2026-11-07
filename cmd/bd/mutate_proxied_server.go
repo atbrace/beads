@@ -68,7 +68,7 @@ func proxiedUpdateIssueFields(ctx context.Context, id, commitMsg string, updates
 
 func runAssignProxiedServer(ctx context.Context, args []string, force bool) error {
 	id := args[0]
-	assignee := args[1]
+	assignee := normalizeAssigneeInput(args[1])
 	updated, err := proxiedUpdateIssueFields(ctx, id, "bd: assign "+id, map[string]any{"assignee": assignee}, force)
 	if err != nil {
 		return HandleErrorRespectJSON("assign %s: %v", id, err)
