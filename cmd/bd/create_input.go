@@ -198,7 +198,9 @@ func gatherCreateInput(cmd *cobra.Command, args []string) (createInput, error) {
 	}
 
 	in.status, _ = cmd.Flags().GetString("status")
-	in.assignee, _ = cmd.Flags().GetString("assignee")
+	// sys-nwwlly: same hidden-empty fold as the update/assign ingest (sys-iagxd9).
+	assigneeRaw, _ := cmd.Flags().GetString("assignee")
+	in.assignee = normalizeAssigneeInput(assigneeRaw)
 	in.externalRef, _ = cmd.Flags().GetString("external-ref")
 	in.explicitID, _ = cmd.Flags().GetString("id")
 	in.parentID, _ = cmd.Flags().GetString("parent")

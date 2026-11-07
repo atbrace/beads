@@ -167,7 +167,9 @@ var createCmd = &cobra.Command{
 		}
 
 		issueType, _ := cmd.Flags().GetString("type")
-		assignee, _ := cmd.Flags().GetString("assignee")
+		// sys-nwwlly: same hidden-empty fold as the update/assign ingest (sys-iagxd9).
+		assigneeRaw, _ := cmd.Flags().GetString("assignee")
+		assignee := normalizeAssigneeInput(assigneeRaw)
 		statusFlag, _ := cmd.Flags().GetString("status")
 		if statusFlag != "" {
 			if !types.Status(statusFlag).IsValidWithCustom(loadEmbeddedCustomStatuses()) {
