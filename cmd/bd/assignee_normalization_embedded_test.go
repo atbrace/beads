@@ -23,16 +23,17 @@ func bdBatchOK(t *testing.T, bd, dir, script string) string {
 	return string(out)
 }
 
-// TestEmbeddedAssigneeInputNormalizationCLI pins the sys-iagxd9 contract: the
-// hidden-empty spellings of an assignee — a bare '-' and whitespace-only
-// values — must take the same clear-to-NULL path that --assignee= and
-// --assignee ” already take, on every CLI ingest surface: `bd update
-// --assignee`, `bd assign <id> <who>`, and the `bd batch` update KV path
-// (script-driven, so the same one on-disk spelling rule applies). Storing
-// those literals verbatim gave "unassigned" three on-disk spellings and every
-// emptiness check (-z, //"", == null) classified a dead-lane dash as ASSIGNED,
-// so a released claim stayed hooked with no alert. Real names — including
-// spaced, parenthesized and dash-containing ones — must pass through verbatim.
+// TestEmbeddedAssigneeInputNormalizationCLI pins the sys-iagxd9 contract (and
+// its sys-nwwlly create-ingest extension): the hidden-empty spellings of an
+// assignee — a bare '-' and whitespace-only values — must take the same
+// clear-to-NULL path that --assignee= and --assignee ” already take, on every
+// CLI ingest surface: `bd create --assignee`, `bd update --assignee`,
+// `bd assign <id> <who>`, and the `bd batch` update KV path (script-driven, so
+// the same one on-disk spelling rule applies). Storing those literals verbatim
+// gave "unassigned" three on-disk spellings and every emptiness check (-z,
+// //"", == null) classified a dead-lane dash as ASSIGNED, so a released claim
+// stayed hooked with no alert. Real names — including spaced, parenthesized
+// and dash-containing ones — must pass through verbatim.
 func TestEmbeddedAssigneeInputNormalizationCLI(t *testing.T) {
 	if os.Getenv("BEADS_TEST_EMBEDDED_DOLT") != "1" {
 		t.Skip("set BEADS_TEST_EMBEDDED_DOLT=1 to run embedded dolt integration tests")
@@ -41,6 +42,31 @@ func TestEmbeddedAssigneeInputNormalizationCLI(t *testing.T) {
 
 	bd := buildEmbeddedBD(t)
 	dir, _, _ := bdInit(t, bd, "--prefix", "an")
+
+	t.Run("create_clear_forms_store_null", func(t *testing.T) {
+		for _, form := range [][]string{
+			{"--assignee="},
+			{"--assignee", ""},
+			{"--assignee", "-"},
+			{"--assignee", " "},
+			{"--assignee", "  - "},
+		} {
+			args := append([]string{"Create clear", "--type", "task"}, form...)
+			issue := bdCreate(t, bd, dir, args...)
+			if got := bdShow(t, bd, dir, issue.ID); got.Assignee != "" {
+				t.Errorf("create %v: assignee=%q, want cleared (NULL)", form, got.Assignee)
+			}
+		}
+	})
+
+	t.Run("create_real_names_pass_through_verbatim", func(t *testing.T) {
+		for _, name := range []string{"Bob", "Bob (Bot)", "a-b", "Dana-Dash (Robot)"} {
+			issue := bdCreate(t, bd, dir, "Create hold", "--type", "task", "--assignee", name)
+			if got := bdShow(t, bd, dir, issue.ID); got.Assignee != name {
+				t.Errorf("create --assignee %q: assignee=%q, want verbatim", name, got.Assignee)
+			}
+		}
+	})
 
 	t.Run("update_clear_forms_store_null", func(t *testing.T) {
 		for _, form := range [][]string{
