@@ -439,8 +439,8 @@ var createCmd = &cobra.Command{
 			setStore(targetStore)
 		}
 
-		if explicitID != "" && parentID != "" {
-			return HandleError("cannot specify both --id and --parent flags")
+		if err := validateCreateIDParent(explicitID, parentID); err != nil {
+			return err
 		}
 
 		parentLookupStore := store
@@ -489,7 +489,12 @@ var createCmd = &cobra.Command{
 		}
 
 		createCtx := rootCtx
-		if parentID != "" {
+		// --parent alone mints the next child id; an explicit dotted --id that
+		// passed validateCreateIDParent keeps the id the caller chose (the
+		// parent-child edge is wired via CreateRequest.ParentID below, and
+		// GetNextChildIDTx counts explicit children off the issues table, so no
+		// counter reservation is needed here).
+		if parentID != "" && explicitID == "" {
 			childID, err := store.GetNextChildID(rootCtx, parentID)
 			if err != nil {
 				return HandleError("%v", err)

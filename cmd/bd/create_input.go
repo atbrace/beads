@@ -208,8 +208,8 @@ func gatherCreateInput(cmd *cobra.Command, args []string) (createInput, error) {
 	in.waitsForGate, _ = cmd.Flags().GetString("waits-for-gate")
 	in.waitsForGateSet = cmd.Flags().Changed("waits-for-gate")
 
-	if in.explicitID != "" && in.parentID != "" {
-		return in, HandleError("cannot specify both --id and --parent flags")
+	if err := validateCreateIDParent(in.explicitID, in.parentID); err != nil {
+		return in, err
 	}
 
 	in.labels, _ = cmd.Flags().GetStringSlice("labels")
@@ -389,4 +389,19 @@ func resolveTitle(args []string, titleFlag, markdownFile, graphFile string) (str
 		return "", HandleError("title cannot be empty or whitespace-only")
 	}
 	return title, nil
+}
+
+// validateCreateIDParent is the single --id/--parent guard for both create
+// routes (gatherCreateInput and the embedded RunE). A dotted --id already
+// names its parent as its prefix, so an --parent that repeats that prefix is
+// the redundant-but-obvious sub-bead spelling and is accepted; the pair is
+// still refused when the two disagree.
+func validateCreateIDParent(explicitID, parentID string) error {
+	if explicitID == "" || parentID == "" {
+		return nil
+	}
+	if dot := strings.LastIndex(explicitID, "."); dot > 0 && explicitID[:dot] == parentID {
+		return nil
+	}
+	return HandleError("cannot specify both --id and --parent flags: drop --parent (a dotted --id implies its parent) or make --parent match the id prefix")
 }

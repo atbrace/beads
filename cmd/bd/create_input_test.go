@@ -272,3 +272,40 @@ func TestIsAmbiguousRepoTarget(t *testing.T) {
 		})
 	}
 }
+
+func TestCreateInput_IDWithMatchingParent(t *testing.T) {
+	// A dotted --id already implies its parent; an --parent that repeats that
+	// prefix is the redundant sub-bead spelling and must gather, not reject
+	// (sys-i02pn2).
+	cmd := newCreateFlagsCommand(t, "--id", "sys-7b8rvl.1", "--parent", "sys-7b8rvl", "--description", "d")
+	in, err := gatherCreateInput(cmd, []string{"matching prefix"})
+	if err != nil {
+		t.Fatalf("matching --parent prefix must be accepted, got: %v", err)
+	}
+	if in.explicitID != "sys-7b8rvl.1" || in.parentID != "sys-7b8rvl" {
+		t.Errorf("explicitID/parentID = %q/%q, want sys-7b8rvl.1/sys-7b8rvl", in.explicitID, in.parentID)
+	}
+
+	// Mismatched prefix stays rejected and names both ways out.
+	cmd = newCreateFlagsCommand(t, "--id", "sys-7b8rvl.1", "--parent", "sys-99999", "--description", "d")
+	var mismatchErr error
+	stderr := captureStderr(t, func() {
+		_, mismatchErr = gatherCreateInput(cmd, []string{"mismatched prefix"})
+	})
+	if mismatchErr == nil {
+		t.Fatal("expected mismatched --parent prefix to be rejected")
+	}
+	if !strings.Contains(stderr, "drop --parent") || !strings.Contains(stderr, "make --parent match the id prefix") {
+		t.Fatalf("expected refusal to carry the drop/match hint, got stderr=%q", stderr)
+	}
+
+	// An undotted --id implies no parent; the pair stays rejected.
+	cmd = newCreateFlagsCommand(t, "--id", "sys-7b8rvl", "--parent", "sys-7b8rvl", "--description", "d")
+	var undottedErr error
+	captureStderr(t, func() {
+		_, undottedErr = gatherCreateInput(cmd, []string{"undotted id"})
+	})
+	if undottedErr == nil {
+		t.Fatal("expected undotted --id with --parent to be rejected")
+	}
+}
